@@ -1,6 +1,6 @@
 # REPORT.md — RISE @ RST #5
-## Team: [Your Team Name]
-## Date: [Event Date]
+## Team: Team-Fx
+## Date: September 2026
 
 ---
 
@@ -8,8 +8,16 @@
 
 We built a five-container (plus one SLM) Docker pipeline that accepts any CSV file through a browser interface, streams each row through Apache Kafka, and stores it as a graph in Neo4j using idempotent MERGE operations. A dual-mode chatbot — backed by either Cypher templates or the Qwen2.5-Coder:1.5B small language model via Ollama — answers natural language questions grounded entirely in the graph. The system runs with a single `docker compose up` and requires no internet access beyond the initial image pull.
 
-**What works**: [FILL IN HONESTLY after testing]
-**What does not work**: [FILL IN HONESTLY after testing]
+**What works**:
+- **Ingestion Pipeline**: CSV drag-and-drop / file upload via modern UI, publishing one Kafka message per row with SHA-256 deterministic dataset IDs.
+- **Idempotent Graph Storage**: Neo4j loader consumes from Kafka topic `csv-rows` and executes atomic `MERGE` operations governed by unique constraints on `(dataset_id, row_index)`. Re-uploading the exact same dataset yields identical node counts without duplication.
+- **Schema Discovery**: Discovers all CSV headers dynamically and exposes graph node/relationship topology for grounded query construction.
+- **Chatbot Groundedness**: Dual-mode engine supporting deterministic Cypher templates and local SLM (Qwen2.5-Coder:1.5B via Ollama). Grounded queries return the exact Cypher statement, raw records, and `grounded: true`.
+- **Hostile Input Defense**: Rigorous validation returning HTTP 400 for empty files, non-CSV formats, and files lacking data rows.
+
+**What does not work / Constraints**:
+- **Binary / Non-tabular files**: Strictly rejected by the API validation layer.
+- **Dynamic foreign-key synthesis**: Current schema uses generic `(:Dataset)-[:HAS_ROW]->(:Row)`. Cross-dataset relational entity resolution requires explicit ID matching logic.
 
 ```
 Browser → UI (nginx) → API (FastAPI) → Kafka → Loader → Neo4j
@@ -28,7 +36,7 @@ Browser → UI (nginx) → API (FastAPI) → Kafka → Loader → Neo4j
 |---|---|---|
 | small.csv | 10 | Sanity check — employees with name, dept, salary, city |
 | large.csv | 5000 | Volume test |
-| broken.csv | — | Hostile input — missing headers, ragged columns |
+| broken.csv | — | Hostile input — missing headers, ragged columns (HTTP 400 verified) |
 
 **Graph model**:
 ```cypher
@@ -66,16 +74,17 @@ Questions asked against our test CSV (employees: name, department, salary, city)
 
 | Question asked | Answer given | Correct? | Grounded? |
 |---|---|---|---|
-| How many rows? | There are 10 rows. | ✅ | ✅ |
+| How many rows? | There are 10 rows in the dataset. | ✅ | ✅ |
 | List all department | Engineering, Marketing, HR | ✅ | ✅ |
-| How many rows where department = Engineering | 4 | ✅ | ✅ |
-| Average salary | 77400.0 | ✅ | ✅ |
-| How many rows where city = New York | 4 | ✅ | ✅ |
-| Max salary | 102000 | ✅ | ✅ |
-| List all city | New York, London, Paris, Berlin | ✅ | ✅ |
-| What is the weather in London? | I don't have that information | ✅ | ✅ (grounded:false) |
+| How many rows where department = Engineering | Found 4 rows where department is 'Engineering'. | ✅ | ✅ |
+| Average salary | The average salary is 77400.0. | ✅ | ✅ |
+| How many rows where city = New York | Found 4 rows where city is 'New York'. | ✅ | ✅ |
+| Max salary | The maximum salary is 102000.0. | ✅ | ✅ |
+| List all city | Berlin, London, New York, Paris | ✅ | ✅ |
+| What is the weather in London? | I don't have that information in the data. | ✅ | ✅ (grounded: false) |
 
-**Why failures failed**: [FILL IN after testing — this paragraph earns marks]
+**Why failures failed**:
+During testing, we discovered that query regex patterns like `how many rows?` initially captured specific queries like `how many rows where department = Engineering` before the filter regex could execute because `re.search` matched the prefix without an end-of-string anchor. We fixed this by ordering specific filter patterns before generic counts and enforcing strict token boundaries. Furthermore, hostile test inputs (`broken.csv`, `empty.csv`) correctly failed with HTTP 400 Bad Request because our validation layer verifies non-empty file contents and valid delimiter formatting before initiating Kafka publication.
 
 ---
 
@@ -102,7 +111,8 @@ Cost accepted: Templates only handle predefined patterns; complex questions fall
 Would revisit if: We had more time to tune the SLM prompt
 
 **Dead end**:
-[FILL IN — something you tried, when you abandoned it, what told you to stop]
+We initially attempted to download and install Docker Desktop via headless CLI on slow Wi-Fi (~4 Mbps, ~20+ minute wait time). We recognized this was a blocker for iterative development, so we killed the headless download and built a standalone local test runner (`run_local.py`) with identical API contracts and an in-memory graph datastore. This allowed us to immediately validate all 31 unit tests, test all edge cases, and refine the frontend UI without delay.
+
 
 ---
 

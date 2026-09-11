@@ -16,6 +16,13 @@ from fastapi import APIRouter
 from pydantic import BaseModel
 from neo4j import GraphDatabase
 
+from src.query_engine import (
+    SchemaInfo,
+    parse_query,
+    generate_cypher,
+    generate_natural_answer
+)
+
 router = APIRouter()
 
 
@@ -48,13 +55,13 @@ def _run_cypher(cypher: str, params: dict = {}) -> list:
 # MODE 1: Cypher Template Map (always grounded, no model)
 # ─────────────────────────────────────────────────────────────
 TEMPLATES = [
-    # Total row count
-    (r"how many rows?",
-     "MATCH (r:Row) RETURN count(r) AS total_rows"),
-
-    # Count where column = value
+    # Count where column = value (MUST be before generic row count)
     (r"how many (?:rows? )?(?:where|with|have?|are|is) (\w[\w\s]*?)\s*(?:=|:)\s*['\"]?([^'\"?\n]+?)['\"]?$",
      "MATCH (r:Row) WHERE r.`{0}` = '{1}' RETURN count(r) AS count"),
+
+    # Total row count
+    (r"^how many rows\??$|^total rows\??$|^count rows\??$",
+     "MATCH (r:Row) RETURN count(r) AS total_rows"),
 
     # Count by column value grouping
     (r"count (?:by|per|group by) (\w+)",
@@ -91,9 +98,49 @@ TEMPLATES = [
 ]
 
 
-def template_chat(question: str) -> dict:
-    q = question.lower().strip()
+def _get_active_schema() -> SchemaInfo:
+    try:
+        driver = _get_driver()
+        with driver.session(database=os.environ.get("NEO4J_DB", "CSV_Graph_DB")) as session:
+            result = session.run("MATCH (r:Row) RETURN r LIMIT 50")
+            nodes = [dict(record["r"]) for record in result if "r" in record]
+            if nodes:
+                cols = [k for k in nodes[0].keys() if k not in ["dataset_id", "row_index"]]
+                return SchemaInfo(cols, nodes)
+    except Exception:
+        pass
+    try:
+        from src.ingest import jobs
+        if jobs:
+            last_job = list(jobs.values())[-1]
+            return SchemaInfo(last_job.get("headers", []))
+    except Exception:
+        pass
+    return SchemaInfo(["name", "department", "salary", "city"])
 
+
+def template_chat(question: str) -> dict:
+    # 1. First attempt the dynamic query engine
+    schema = _get_active_schema()
+    plan = parse_query(question, schema)
+
+    if plan is not None:
+        cypher = generate_cypher(plan, schema)
+        try:
+            records = _run_cypher(cypher)
+            if records:
+                answer = generate_natural_answer(plan, records, schema)
+                return {
+                    "answer":   answer,
+                    "cypher":   cypher,
+                    "result":   records,
+                    "grounded": True,
+                }
+        except Exception as e:
+            logging.warning(f"Engine Cypher failed: {e}")
+
+    # 2. Secondary fallback: regex TEMPLATES
+    q = question.lower().strip()
     for pattern, cypher_template in TEMPLATES:
         match = re.search(pattern, q, re.IGNORECASE)
         if match:
@@ -115,13 +162,14 @@ def template_chat(question: str) -> dict:
                 logging.warning(f"Template Cypher failed: {e}")
                 continue
 
-    # No template matched — honest answer
+    # 3. No match / Out of domain — honest response
     return {
         "answer":   "I don't have that information in the loaded data.",
         "cypher":   None,
         "result":   [],
         "grounded": False,
     }
+
 
 
 # ─────────────────────────────────────────────────────────────

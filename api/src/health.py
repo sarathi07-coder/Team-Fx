@@ -8,7 +8,14 @@ import os
 import logging
 from fastapi import APIRouter
 from kafka import KafkaProducer
-from kafka.errors import NoBrokersAvailable
+try:
+    from kafka.errors import NoBrokersAvailable
+except ImportError:
+    try:
+        from kafka.errors import BrokerNotAvailableError as NoBrokersAvailable
+    except ImportError:
+        class NoBrokersAvailable(Exception): pass
+
 from neo4j import GraphDatabase
 from neo4j.exceptions import ServiceUnavailable
 
