@@ -116,7 +116,8 @@ CODE=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$BASE/ingest" -F "file=@/
 echo "   Empty file → HTTP $CODE (expected 400)"
 
 # Non-CSV
-CODE=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$BASE/ingest" -F "file=@/tmp/test_pipeline.sh")
+echo "not a csv file" > /tmp/test_file.txt
+CODE=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$BASE/ingest" -F "file=@/tmp/test_file.txt")
 echo "   Non-CSV file → HTTP $CODE (expected 400)"
 
 # Chat before upload

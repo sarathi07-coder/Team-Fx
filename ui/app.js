@@ -110,7 +110,18 @@ async function handleUpload(file) {
 
   try {
     const res = await fetch(`${API}/ingest`, { method: 'POST', body: form });
-    const data = await res.json();
+    let data = {};
+    try {
+      data = await res.json();
+    } catch (parseErr) {
+      if (res.status === 413) {
+        showError('File is too large (exceeds maximum allowed size).');
+      } else {
+        showError(`Server error (${res.status} ${res.statusText || 'Unknown'})`);
+      }
+      document.getElementById('progress-status').textContent = 'Failed';
+      return;
+    }
 
     if (!res.ok) {
       showError(data.detail || 'Upload failed');
@@ -137,7 +148,7 @@ async function handleUpload(file) {
     pollInterval = setInterval(() => pollStatus(currentJobId), 400);
 
   } catch (err) {
-    showError('Network error connecting to API.');
+    showError('Network error connecting to API: ' + (err.message || 'Check Docker containers'));
   }
 }
 

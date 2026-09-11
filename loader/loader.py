@@ -39,6 +39,17 @@ MERGE (r:Row {dataset_id: $dataset_id, row_index: $row_index})
 MERGE (d)-[:HAS_ROW]->(r)
 """
 
+BATCH_MERGE_QUERY = """
+UNWIND $batch AS item
+MERGE (d:Dataset {id: item.dataset_id})
+  ON CREATE SET
+    d.filename    = item.filename,
+    d.uploaded_at = datetime()
+MERGE (r:Row {dataset_id: item.dataset_id, row_index: item.row_index})
+  ON CREATE SET r += item.properties
+MERGE (d)-[:HAS_ROW]->(r)
+"""
+
 # Constraints ensure MERGE is atomic and duplicates are impossible
 CONSTRAINTS = [
     "CREATE CONSTRAINT dataset_unique IF NOT EXISTS "
@@ -102,6 +113,26 @@ def connect_neo4j() -> GraphDatabase:
 # ─────────────────────────────────────────────────────────────
 # Main consumer loop
 # ─────────────────────────────────────────────────────────────
+def sanitize_properties(raw_data: dict, dataset_id: str, row_index: int) -> dict:
+    """Sanitizes property keys so Neo4j never encounters empty or null tokens."""
+    clean = {}
+    unnamed_idx = 1
+    for k, v in raw_data.items():
+        if k is None or not str(k).strip():
+            k_name = f"unnamed_col_{unnamed_idx}"
+            unnamed_idx += 1
+        else:
+            k_name = str(k).strip()
+        # Remove null bytes and backticks
+        k_name = k_name.replace("\x00", "").replace("`", "")
+        if k_name:
+            clean[k_name] = str(v).strip() if v is not None else ""
+
+    clean["dataset_id"] = dataset_id
+    clean["row_index"]  = int(row_index)
+    return clean
+
+
 def main():
     logging.info("🚀 Loader starting up...")
 
@@ -109,33 +140,49 @@ def main():
     driver   = connect_neo4j()
     db       = os.environ["NEO4J_DB"]
 
-    logging.info("📥 Consuming from topic: csv-rows")
+    logging.info("📥 Consuming from topic: csv-rows (High-throughput batching)")
 
-    for message in consumer:
-        msg = message.value
-        try:
-            properties = {
-                **msg["data"],
-                "dataset_id": msg["dataset_id"],
-                "row_index":  int(msg["row_index"]),
-            }
-            with driver.session(database=db) as session:
-                session.run(MERGE_QUERY, {
-                    "dataset_id": msg["dataset_id"],
-                    "filename":   msg["filename"],
-                    "row_index":  int(msg["row_index"]),
-                    "properties": properties,
-                })
-            logging.info(
-                f"✅ Merged job={msg['job_id']} "
-                f"row={msg['row_index']} "
-                f"dataset={msg['dataset_id'][:8]}"
-            )
-        except Exception as e:
-            logging.error(
-                f"❌ Failed job={msg.get('job_id')} "
-                f"row={msg.get('row_index')}: {e}"
-            )
+    while True:
+        records_dict = consumer.poll(timeout_ms=300, max_records=250)
+        if not records_dict:
+            continue
+
+        batch = []
+        for tp, messages in records_dict.items():
+            for message in messages:
+                msg = message.value
+                try:
+                    props = sanitize_properties(
+                        msg.get("data", {}),
+                        msg["dataset_id"],
+                        msg["row_index"],
+                    )
+                    batch.append({
+                        "dataset_id": msg["dataset_id"],
+                        "filename":   msg["filename"],
+                        "row_index":  int(msg["row_index"]),
+                        "properties": props,
+                        "job_id":     msg.get("job_id"),
+                    })
+                except Exception as e:
+                    logging.error(f"❌ Error preparing message: {e}")
+
+        if batch:
+            try:
+                with driver.session(database=db) as session:
+                    session.run(BATCH_MERGE_QUERY, {"batch": batch})
+                logging.info(
+                    f"✅ Batch merged {len(batch)} rows "
+                    f"(dataset={batch[0]['dataset_id'][:8]} job={batch[0].get('job_id')})"
+                )
+            except Exception as e:
+                logging.warning(f"⚠️ Batch merge failed ({e}) — falling back to row-by-row")
+                with driver.session(database=db) as session:
+                    for item in batch:
+                        try:
+                            session.run(MERGE_QUERY, item)
+                        except Exception as row_err:
+                            logging.error(f"❌ Row failed: {row_err}")
 
 
 if __name__ == "__main__":

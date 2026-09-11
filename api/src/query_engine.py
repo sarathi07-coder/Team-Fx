@@ -28,8 +28,12 @@ class SchemaInfo:
         # Classify columns
         for c in columns:
             cl = c.lower()
-            if any(k in cl for k in ["name", "employee", "person", "user", "title", "full_name"]):
+            if any(k in cl for k in ["name", "person", "user", "title", "full_name", "company", "firm", "org", "founder", "client", "customer"]) or (cl in ["employee", "worker", "agent"]):
                 self.name_cols.add(c)
+            if cl != "country" and any(k in cl for k in ["salary", "amount", "price", "cost", "revenue", "profit", "sales", "quantity", "rate", "score", "total", "pay", "value", "val", "metric", "valuation", "funding", "employees", "founded"]):
+                self.numeric_cols.add(c)
+            elif any(tok in ["count", "age", "num", "no", "year"] for tok in re.split(r"[_\s]+", cl)):
+                self.numeric_cols.add(c)
 
         if sample_rows:
             # Check numeric types
@@ -50,16 +54,24 @@ class SchemaInfo:
                 for col, val in r.items():
                     if val and str(val).strip():
                         sval = str(val).strip()
-                        # Index if length <= 50 to avoid whole sentences
-                        if len(sval) <= 50:
+                        # Index if length <= 50 to avoid whole sentences, and exclude numbers/numeric cols
+                        if len(sval) <= 50 and not sval.replace(".", "", 1).isdigit() and col not in self.numeric_cols:
                             self.value_index[sval.lower()] = (col, sval)
 
     def find_column(self, token: str) -> Optional[str]:
         t = token.lower().strip()
         if t in self.col_lower_map:
             return self.col_lower_map[t]
+        if t.endswith("ies") and (t[:-3] + "y") in self.col_lower_map:
+            return self.col_lower_map[t[:-3] + "y"]
+        if t.endswith("s") and t[:-1] in self.col_lower_map:
+            return self.col_lower_map[t[:-1]]
         for c in self.columns:
-            if c.lower().startswith(t) or t.startswith(c.lower()):
+            cl = c.lower()
+            if cl.startswith(t) or t.startswith(cl):
+                return c
+            tokens = [tok for tok in re.split(r"[_\s]+", cl) if len(tok) > 2]
+            if t in tokens:
                 return c
         return None
 
@@ -67,6 +79,34 @@ class SchemaInfo:
         """Returns (column_name, exact_value) if phrase matches a known data value."""
         p = phrase.lower().strip()
         return self.value_index.get(p)
+
+
+def _match_column(col_name: str, query_lower: str) -> bool:
+    cl = col_name.lower()
+    if cl in query_lower:
+        return True
+    tokens = [t for t in re.split(r"[_\s]+", cl) if len(t) > 3 and t not in ["millions", "billions", "total", "count", "code", "index"]]
+    for t in tokens:
+        if t in query_lower:
+            return True
+    return False
+
+
+def _pick_default_numeric_col(schema: SchemaInfo) -> Optional[str]:
+    # Priority 1: High-confidence metrics
+    for nc in schema.numeric_cols:
+        ncl = nc.lower()
+        if any(k in ncl for k in ["salary", "value", "val", "amount", "revenue", "price", "sales", "pay", "cost", "total", "profit", "valuation", "funding"]):
+            return nc
+    # Priority 2: Not an id or year or index
+    for nc in schema.numeric_cols:
+        ncl = nc.lower()
+        if not any(k in ncl for k in ["id", "year", "code", "index", "date"]):
+            return nc
+    # Priority 3: Any numeric
+    if schema.numeric_cols:
+        return next(iter(schema.numeric_cols))
+    return None
 
 
 def parse_query(question: str, schema: SchemaInfo) -> Optional[Dict[str, Any]]:
@@ -154,27 +194,54 @@ def parse_query(question: str, schema: SchemaInfo) -> Optional[Dict[str, Any]]:
             if not already_filtered:
                 plan["filters"].append((c_name, "=", exact_val))
 
-    # 5. SUPERLATIVE & RANKINGS: "highest salary", "who earns the most", "top 3", "lowest"
-    m_top = re.search(r"\btop\s+(\d+)\b", ql)
-    is_highest = bool(re.search(r"\b(highest|most|max|maximum|best|largest|top earner)\b", ql))
-    is_lowest = bool(re.search(r"\b(lowest|least|min|minimum|worst|smallest|bottom)\b", ql))
+    # 5. SUPERLATIVE & RANKINGS: "highest salary", "tell the highest value", "top 3", "lowest"
+    m_top = re.search(r"\b(?:top|highest|hihgest|largest|lowest|bottom)\s+(\d+)\b", ql)
+    is_highest = bool(re.search(r"\b(highest|hihgest|higest|heighest|hieghest|hightest|most|max|maximum|best|largest|biggest|top earner|peak)\b", ql))
+    is_lowest = bool(re.search(r"\b(lowest|lowset|least|min|minimum|worst|smallest|bottom)\b", ql))
 
     if m_top:
         limit = int(m_top.group(1))
         plan["intent"] = "TOP_N"
         plan["limit"] = limit
-        num_col = next(iter(schema.numeric_cols), None)
-        if num_col:
-            order_dir = "ASC" if is_lowest else "DESC"
-            plan["order_by"] = (num_col, order_dir)
-    elif is_highest or is_lowest:
         num_col = None
         for nc in schema.numeric_cols:
-            if nc.lower() in ql:
+            if _match_column(nc, ql):
                 num_col = nc
                 break
         if not num_col:
-            num_col = next(iter(schema.numeric_cols), None)
+            for c in schema.columns:
+                if c.lower() in ql or _match_column(c, ql):
+                    num_col = c
+                    break
+        if not num_col:
+            num_col = _pick_default_numeric_col(schema)
+        if num_col:
+            order_dir = "ASC" if (is_lowest and not is_highest) or re.search(r"\b(lowest|bottom|least|min)\b", ql) else "DESC"
+            plan["order_by"] = (num_col, order_dir)
+            if schema.name_cols:
+                best_name = next((c for c in ["company", "name", "founder", "title"] if c in schema.name_cols), next(iter(schema.name_cols)))
+                plan["target_cols"] = [best_name, num_col]
+            else:
+                other_cols = [c for c in schema.columns if c != num_col and c not in schema.numeric_cols][:2]
+                plan["target_cols"] = [num_col] + other_cols
+    elif is_highest or is_lowest:
+        num_col = None
+        # 1. Check numeric cols
+        for nc in schema.numeric_cols:
+            if _match_column(nc, ql):
+                num_col = nc
+                break
+        # 2. Check ANY column in schema mentioned in query
+        if not num_col:
+            for c in schema.columns:
+                if (c.lower() in ql or _match_column(c, ql)) and c not in [f[0] for f in plan["filters"]]:
+                    num_col = c
+                    break
+        # 3. Fallback to default numeric column or last column
+        if not num_col:
+            num_col = _pick_default_numeric_col(schema)
+        if not num_col and schema.columns:
+            num_col = schema.columns[-1]
 
         if re.search(r"\b(which department|which city|what department|what city)\b", ql):
             # Superlative on grouping
@@ -188,11 +255,19 @@ def parse_query(question: str, schema: SchemaInfo) -> Optional[Dict[str, Any]]:
                 plan["agg_col"] = num_col
                 plan["order_by"] = ("agg_val", "DESC" if is_highest else "ASC")
                 plan["limit"] = 1
-        elif re.search(r"\b(who|which person|employee|name)\b", ql) or not plan["filters"]:
+        else:
             plan["intent"] = "SUPERLATIVE"
             if num_col:
-                plan["order_by"] = (num_col, "DESC" if is_highest else "ASC")
+                order_dir = "DESC" if is_highest else "ASC"
+                plan["order_by"] = (num_col, order_dir)
                 plan["limit"] = 1
+                if schema.name_cols:
+                    best_name = next((c for c in ["company", "name", "founder", "title"] if c in schema.name_cols), next(iter(schema.name_cols)))
+                    other_name = [c for c in schema.name_cols if c != best_name][:1]
+                    plan["target_cols"] = [best_name] + other_name + [num_col]
+                else:
+                    other_cols = [c for c in schema.columns if c != num_col and c not in schema.numeric_cols][:2]
+                    plan["target_cols"] = [num_col] + other_cols
 
     # 6. AGGREGATIONS: Average, Sum, Max, Min, Count
     if not plan["order_by"]:
@@ -200,20 +275,20 @@ def parse_query(question: str, schema: SchemaInfo) -> Optional[Dict[str, Any]]:
             plan["intent"] = "AGGREGATE"
             plan["agg_func"] = "AVG"
             for nc in schema.numeric_cols:
-                if nc.lower() in ql:
+                if _match_column(nc, ql):
                     plan["agg_col"] = nc
                     break
             if not plan["agg_col"]:
-                plan["agg_col"] = next(iter(schema.numeric_cols), None)
+                plan["agg_col"] = _pick_default_numeric_col(schema)
         elif re.search(r"\b(total|sum)\b", ql):
             plan["intent"] = "AGGREGATE"
             plan["agg_func"] = "SUM"
             for nc in schema.numeric_cols:
-                if nc.lower() in ql:
+                if _match_column(nc, ql):
                     plan["agg_col"] = nc
                     break
             if not plan["agg_col"]:
-                plan["agg_col"] = next(iter(schema.numeric_cols), None)
+                plan["agg_col"] = _pick_default_numeric_col(schema)
         elif re.search(r"\b(how many|count|number of)\b", ql):
             plan["intent"] = "COUNT"
             plan["agg_func"] = "COUNT"
@@ -238,7 +313,20 @@ def parse_query(question: str, schema: SchemaInfo) -> Optional[Dict[str, Any]]:
                     sal_col = next(iter(schema.numeric_cols), None)
                     if sal_col: plan["target_cols"].append(sal_col)
 
-    # 8. GENERAL PROJECTION
+    # 8. DISTINCT LIST CHECK: "List all department", "List departments", "What are the departments?", "Distinct cities"
+    if not plan["agg_func"] and not plan["order_by"]:
+        if re.search(r"\b(distinct|unique|all\s+\w+|list\b|show\b|what are\b)\b", ql):
+            words = set(re.findall(r"\b\w+\b", ql))
+            for c in schema.columns:
+                c_sing = c.lower()
+                c_plur = (c_sing[:-1] + "ies") if c_sing.endswith("y") else (c_sing + "s")
+                if (c_sing in words or c_plur in words or f"all {c_sing}" in ql or f"all {c_plur}" in ql or f"list {c_sing}" in ql or f"list {c_plur}" in ql) and c not in [f[0] for f in plan["filters"]]:
+                    plan["target_cols"] = [c]
+                    plan["distinct"] = True
+                    plan["intent"] = "DISTINCT_LIST"
+                    break
+
+    # 9. GENERAL PROJECTION
     if not plan["target_cols"]:
         # If question asks "who", project name columns
         if re.search(r"\bwho\b", ql) or "employee" in ql:
@@ -259,6 +347,8 @@ def generate_cypher(plan: Dict[str, Any], schema: SchemaInfo) -> str:
     Generates clean Neo4j Cypher query from the plan.
     """
     where_clauses = []
+    if plan.get("dataset_id"):
+        where_clauses.append(f"r.`dataset_id` = '{plan['dataset_id']}'")
     for col, op, val in plan["filters"]:
         if op in [">", "<", ">=", "<="]:
             where_clauses.append(f"toFloat(r.`{col}`) {op} {val}")
@@ -268,6 +358,11 @@ def generate_cypher(plan: Dict[str, Any], schema: SchemaInfo) -> str:
             where_clauses.append(f"r.`{col}` = {val}")
 
     where_str = ("\nWHERE " + " AND ".join(where_clauses)) if where_clauses else ""
+
+    # Distinct query
+    if plan.get("distinct") and len(plan.get("target_cols", [])) == 1:
+        c = plan["target_cols"][0]
+        return f"MATCH (r:Row){where_str}\nRETURN DISTINCT r.`{c}` AS `{c}`\nORDER BY `{c}` ASC\nLIMIT 50"
 
     # Group by query
     if plan.get("group_by"):
@@ -303,9 +398,15 @@ def generate_cypher(plan: Dict[str, Any], schema: SchemaInfo) -> str:
     returns = [f"r.`{c}` AS `{c}`" for c in plan["target_cols"]]
     if plan.get("order_by"):
         ord_col, ord_dir = plan["order_by"]
-        if f"r.`{ord_col}` AS `{ord_col}`" not in returns:
-            returns.append(f"toFloat(r.`{ord_col}`) AS `{ord_col}`")
-        cypher = f"MATCH (r:Row){where_str}\nRETURN {', '.join(returns)}\nORDER BY r.`{ord_col}` {ord_dir}"
+        is_num = ord_col in schema.numeric_cols
+        if is_num:
+            where_clauses.append(f"toFloat(r.`{ord_col}`) IS NOT NULL")
+            where_str = ("\nWHERE " + " AND ".join(where_clauses)) if where_clauses else ""
+            returns = [f"toFloat(r.`{c}`) AS `{c}`" if c == ord_col else f"r.`{c}` AS `{c}`" for c in plan["target_cols"]]
+        elif f"r.`{ord_col}` AS `{ord_col}`" not in returns:
+            returns.append(f"r.`{ord_col}` AS `{ord_col}`")
+        sort_expr = f"toFloat(r.`{ord_col}`)" if is_num else f"r.`{ord_col}`"
+        cypher = f"MATCH (r:Row){where_str}\nRETURN {', '.join(returns)}\nORDER BY {sort_expr} {ord_dir}"
     else:
         cypher = f"MATCH (r:Row){where_str}\nRETURN {', '.join(returns)}"
 
@@ -323,6 +424,8 @@ def execute_plan_in_memory(plan: Dict[str, Any], rows: List[Dict[str, Any]], sch
     """
     # 1. Filter rows
     matched = []
+    if plan.get("dataset_id"):
+        rows = [r for r in rows if r.get("dataset_id") == plan["dataset_id"]]
     for r in rows:
         ok = True
         for col, op, val in plan["filters"]:
@@ -413,8 +516,17 @@ def execute_plan_in_memory(plan: Dict[str, Any], rows: List[Dict[str, Any]], sch
                 return str(v)
         matched.sort(key=_sort_val, reverse=reverse)
 
-    if plan.get("limit"):
-        matched = matched[:plan["limit"]]
+    # Distinct deduplication
+    if plan.get("distinct") and len(plan.get("target_cols", [])) == 1:
+        c = plan["target_cols"][0]
+        seen = set()
+        out = []
+        for r in matched:
+            v = r.get(c)
+            if v is not None and v not in seen:
+                seen.add(v)
+                out.append({c: v})
+        return out
 
     # Return projected fields
     out = []
@@ -431,6 +543,12 @@ def generate_natural_answer(plan: Dict[str, Any], results: List[Dict[str, Any]],
     if not results:
         return "No matching records found in the dataset."
 
+    # Distinct list answers
+    if plan.get("intent") == "DISTINCT_LIST" or plan.get("distinct"):
+        col = plan["target_cols"][0]
+        vals = [str(r[col]) for r in results if r.get(col)]
+        return f"Found {len(vals)} distinct {col}{'s' if len(vals) != 1 else ''}: {', '.join(vals)}."
+
     # Group by answers
     if plan.get("group_by"):
         g_col = plan["group_by"]
@@ -444,26 +562,49 @@ def generate_natural_answer(plan: Dict[str, Any], results: List[Dict[str, Any]],
         func = plan["agg_func"]
         if func == "COUNT":
             cnt = results[0].get("total_count", len(results))
-            return f"Found {cnt} matching record{'s' if cnt != 1 else ''} in the dataset."
+            filter_desc = " ".join([f"where {c} is {v}" for c, op, v in plan["filters"]])
+            desc = f" ({filter_desc})" if filter_desc else ""
+            return f"Found {cnt} matching record{'s' if cnt != 1 else ''}{desc} in the dataset."
         metric_k = list(results[0].keys())[0]
         val = results[0][metric_k]
         name = metric_k.replace("_", " ")
         filter_desc = " ".join([f"where {c} is {v}" for c, op, v in plan["filters"]])
         desc = f" ({filter_desc})" if filter_desc else ""
-        return f"The {name}{desc} is {val:,.2f}" if isinstance(val, (int, float)) else f"The {name}{desc} is {val}."
+        if isinstance(val, (int, float)):
+            fval = f"{int(val):,}" if float(val).is_integer() else f"{val:,.2f}"
+            return f"The {name}{desc} is {fval}."
+        return f"The {name}{desc} is {val}."
 
     # Superlative / Rankings / Single record lookup
     if plan.get("intent") in ["SUPERLATIVE", "LOOKUP"] and len(results) == 1:
         res = results[0]
         name_col = next((c for c in schema.name_cols if c in res), None)
-        if name_col:
+        ord_col = plan["order_by"][0] if plan.get("order_by") else None
+        ord_dir = plan["order_by"][1] if plan.get("order_by") else "DESC"
+        ord_word = ord_dir.lower().replace("desc", "highest").replace("asc", "lowest")
+
+        if plan.get("intent") == "SUPERLATIVE" and ord_col:
+            val = res.get(ord_col)
+            if isinstance(val, (int, float)):
+                fval = f"{int(val):,}" if float(val).is_integer() else f"{val:,.2f}"
+            else:
+                fval = str(val)
+
+            if name_col and name_col in res:
+                name_val = res[name_col]
+                other_attrs = [f"{k}: {v}" for k, v in res.items() if k not in [name_col, ord_col]]
+                attr_str = f" ({', '.join(other_attrs)})" if other_attrs else ""
+                return f"{name_val} has the {ord_word} {ord_col} ({ord_col}: {fval}){attr_str}."
+            else:
+                other_attrs = [f"{k}: {v}" for k, v in res.items() if k != ord_col]
+                attr_str = f" ({', '.join(other_attrs)})" if other_attrs else ""
+                return f"The {ord_word} {ord_col} is {fval}{attr_str}."
+
+        if name_col and name_col in res:
             name_val = res[name_col]
             other_attrs = [f"{k}: {v}" for k, v in res.items() if k != name_col]
-            attr_str = f" ({', '.join(other_attrs)})" if other_attrs else ""
-            if plan.get("intent") == "SUPERLATIVE":
-                ord_col = plan["order_by"][0] if plan.get("order_by") else "value"
-                return f"{name_val} has the {plan['order_by'][1].lower().replace('desc', 'highest').replace('asc', 'lowest')} {ord_col}{attr_str}."
             return f"{name_val}'s details: {', '.join(other_attrs)}."
+
         return f"Result: {', '.join(f'{k}: {v}' for k, v in res.items())}."
 
     if plan.get("intent") == "TOP_N":
@@ -472,9 +613,15 @@ def generate_natural_answer(plan: Dict[str, Any], results: List[Dict[str, Any]],
         num_col = plan["order_by"][0] if plan.get("order_by") else None
         for idx, r in enumerate(results, 1):
             if name_col and num_col:
-                items.append(f"{idx}. {r[name_col]} ({r.get(num_col)})")
-            elif name_col:
-                items.append(f"{idx}. {r[name_col]}")
+                v = r.get(num_col)
+                fv = f"{int(v):,}" if isinstance(v, (int, float)) and float(v).is_integer() else f"{v}"
+                items.append(f"{idx}. {r[name_col]} ({num_col}: {fv})")
+            elif num_col:
+                v = r.get(num_col)
+                fv = f"{int(v):,}" if isinstance(v, (int, float)) and float(v).is_integer() else f"{v}"
+                other = [f"{k}: {val}" for k, val in r.items() if k != num_col]
+                extra = f" ({', '.join(other)})" if other else ""
+                items.append(f"{idx}. {num_col}: {fv}{extra}")
             else:
                 items.append(f"{idx}. {r}")
         return f"Top {len(results)}:\n" + ", ".join(items)

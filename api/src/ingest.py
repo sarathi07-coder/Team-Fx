@@ -72,9 +72,21 @@ async def ingest(file: UploadFile = File(...)):
     if not reader:
         raise HTTPException(400, detail="CSV has a header row but no data rows")
 
-    headers = list(reader[0].keys())
-    if not headers:
+    raw_headers = list(reader[0].keys())
+    if not raw_headers or not any(h and str(h).strip() for h in raw_headers):
         raise HTTPException(400, detail="CSV header row is empty")
+
+    headers = []
+    header_map = {}
+    unnamed_c = 1
+    for h in raw_headers:
+        if h is None or not str(h).strip():
+            clean_h = f"unnamed_{unnamed_c}"
+            unnamed_c += 1
+        else:
+            clean_h = str(h).strip().replace("\x00", "").replace("`", "")
+        headers.append(clean_h)
+        header_map[h] = clean_h
 
     # ── 4. Generate stable, reproducible IDs ──
     # dataset_id is deterministic: same file name + same row count = same ID
@@ -82,18 +94,23 @@ async def ingest(file: UploadFile = File(...)):
     dataset_id = hashlib.sha256(
         f"{file.filename}:{len(reader)}".encode()
     ).hexdigest()[:16]
-    job_id = str(uuid.uuid4())[:8]
+    job_id = dataset_id[:8]
 
     # ── 5. Publish to Kafka — one message per row ──
     try:
         producer = _get_producer()
         for idx, row in enumerate(reader):
+            clean_data = {
+                header_map[orig_k]: str(row.get(orig_k, "")).strip()
+                for orig_k in raw_headers
+                if orig_k in header_map
+            }
             producer.send("csv-rows", value={
                 "job_id":     job_id,
                 "dataset_id": dataset_id,
                 "filename":   file.filename,
                 "row_index":  idx,
-                "data":       dict(row),
+                "data":       clean_data,
             })
         producer.flush()
         producer.close()

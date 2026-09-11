@@ -1,0 +1,21 @@
+company,founder,category,country,city,valuation_billions,employees,founded_year,funding_millions
+OpenAI,Sam Altman,LLM Research,United States,San Francisco,157.0,1700,2015,17900
+Anthropic,Dario Amodei,AI Safety & LLMs,United States,San Francisco,40.0,500,2021,9700
+Mistral AI,Arthur Mensch,Open Weights LLM,France,Paris,6.0,150,2023,1100
+Hugging Face,Clement Delangue,Open Source AI Hub,United States,New York,4.5,220,2016,395
+Perplexity,Aravind Srinivas,Conversational AI Search,United States,San Francisco,9.0,250,2022,165
+Cohere,Aidan Gomez,Enterprise AI,Canada,Toronto,5.5,400,2019,970
+Scale AI,Alexandr Wang,Data Infrastructure,United States,San Francisco,14.0,1000,2016,1600
+ElevenLabs,Mati Staniszewski,Voice AI & Audio,United States,New York,3.0,120,2022,180
+DeepMind,Demis Hassabis,AGI & Scientific AI,United Kingdom,London,80.0,1200,2010,1200
+Runway,Cristobal Valenzuela,Generative Video,United States,New York,4.0,180,2018,237
+Cursor,Michael Truell,AI Code Editor,United States,San Francisco,2.5,80,2022,60
+Midjourney,David Holz,Generative Art,United States,San Francisco,10.0,100,2021,100
+Synthesia,Victor Riparbelli,AI Video Generation,United Kingdom,London,1.5,250,2017,156
+Poolside,Jason Warner,Code Generation Models,France,Paris,3.0,90,2023,500
+Harvey,Winston Weinberg,Legal AI Assistant,United States,San Francisco,1.5,140,2022,106
+Character.AI,Noam Shazeer,Conversational Personas,United States,Menlo Park,5.0,200,2021,193
+Causal,Lukas Koebis,AI Analytics,United Kingdom,London,0.8,60,2019,45
+Cognition,Scott Wu,Autonomous Coding Agents,United States,San Francisco,2.0,50,2023,175
+Stability AI,Emad Mostaque,Open Multimodal AI,United Kingdom,London,1.0,150,2019,173
+Writer,May Habib,Enterprise Generative AI,United States,San Francisco,1.9,200,2020,126
